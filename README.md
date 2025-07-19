@@ -4,7 +4,7 @@ zero‑dependency Python scripts that benchmark **FastStorage** `*.bin.lz4` ma
 
 | Script | Native library | Highlights |
 |--------|---------------|------------|
-| **`bench_faststorage.py`** | `faststorage‑rs` (Rust) | ultra‑lean, zero allocations, ~2× faster |
+| **`bench_faststorage_rust.py`** | `faststorage‑rs` (Rust) | ultra‑lean, zero allocations, ~2× faster |
 | **`bench_faststorage_cs.py`** | `FastStorage.Native` (C#) | richer error handling, parity with .NET writer |
 
 
