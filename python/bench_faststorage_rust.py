@@ -4,7 +4,7 @@ FastStorage *.bin.lz4 benchmark – zero‑dependency pure Python.
 
 Usage
 -----
-    python bench_faststorage_rust.py  <file.bin.lz4>
+    python bench_faststorage.py  <file.bin.lz4>
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class FastReader:
         ptr = ctypes.c_void_p()
         sz = _lib.read_message(self._h, ctypes.byref(ptr))
         if sz > 0:
-            return ptr.value
+            return ptr.value            # raw pointer address
         if sz == 0:
             raise StopIteration
         raise OSError(f"native reader error {sz}")
@@ -92,7 +92,9 @@ def benchmark(path: str) -> None:
     t0 = time.perf_counter()
 
     bids, asks, trades = {}, {}, []
-    cnt = 0
+    cnt                       = 0
+    building_snapshot         = True   # True from CLEAR until first Tick
+    first_snapshot_printed    = False  # guard one‑off print
 
     hdr = _Hdr.from_address
     i64 = ctypes.c_int64.from_address
@@ -101,6 +103,7 @@ def benchmark(path: str) -> None:
     with FastReader(path) as rdr:
         for addr in rdr:
             k = hdr(addr).kind
+
             if k == Kind.Depth:
                 px  = i64(addr + _PX ).value * _SCALE
                 vol = i64(addr + _VOL).value * _SCALE
@@ -108,6 +111,8 @@ def benchmark(path: str) -> None:
 
                 if fl & Flag.Clear:
                     bids.clear(); asks.clear()
+                    building_snapshot = True
+
                 book = bids if fl & Flag.Buy else asks
                 if vol > 0:
                     book[px] = vol
@@ -118,8 +123,18 @@ def benchmark(path: str) -> None:
                 trades.append(( i64(addr + _TS ).value,
                                 i64(addr + _PX ).value * _SCALE,
                                 i64(addr + _VOL).value * _SCALE ))
+
+                if building_snapshot:
+                    building_snapshot = False
+                    if bids and asks and not first_snapshot_printed:
+                        bb, ba = max(bids), min(asks)
+                        print("\nFirst complete book ➜ "
+                              f"best bid {bb:.2f}, best ask {ba:.2f}")
+                        first_snapshot_printed = True
+
             cnt += 1
 
+    # ---------- final summary ----------
     dt = time.perf_counter() - t0
     bb = max(bids) if bids else None
     ba = min(asks) if asks else None

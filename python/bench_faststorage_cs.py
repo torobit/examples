@@ -1,69 +1,32 @@
-import ctypes
-import os
-import platform
-import time
+import ctypes, os, platform, time
 from enum import IntEnum
 
-
-# =============================================================================
-# 1.STRUCTURES
-# =============================================================================
-
-class MessageKind(IntEnum):
-    Depth = 0
-    Tick = 1
-    Symbol = 2
-    Candle = 3
-    CandleEnd = 4
-
-
-class OrderSide(IntEnum):
-    Unknown = 0
-    Buy = 1
-    Sell = 2
-
-
-class MarketFlag(IntEnum):
-    Buy = 1
-    Sell = 2
-    Clear = 4
-    EndOfTransaction = 8
-
+# ─────────────────── 1. Wire format enums & structs ────────────────────
+class MessageKind(IntEnum): Depth = 0; Tick = 1
+class MarketFlag(IntEnum):  Buy = 1; Sell = 2; Clear = 4
 
 class MessageHeader(ctypes.Structure):
     _pack_ = 1
-    _fields_ = [
-        ("Kind", ctypes.c_short),
-        ("Size", ctypes.c_ushort),
-        ("Time", ctypes.c_longlong),
-    ]
-
+    _fields_ = [("Kind", ctypes.c_short),
+                ("Size", ctypes.c_ushort),
+                ("Time", ctypes.c_longlong)]
 
 class DepthItem(ctypes.Structure):
     _pack_ = 1
-    _fields_ = [
-        ("Header", MessageHeader),
-        ("Price", ctypes.c_longlong),
-        ("Volume", ctypes.c_longlong),
-        ("Flags", ctypes.c_byte),
-    ]
-
+    _fields_ = [("Header", MessageHeader),
+                ("Price",  ctypes.c_longlong),
+                ("Volume", ctypes.c_longlong),
+                ("Flags",  ctypes.c_byte)]
 
 class TickItem(ctypes.Structure):
     _pack_ = 1
-    _fields_ = [
-        ("Header", MessageHeader),
-        ("Id", ctypes.c_longlong),
-        ("Price", ctypes.c_longlong),
-        ("Volume", ctypes.c_longlong),
-        ("Type", ctypes.c_byte),
-    ]
+    _fields_ = [("Header", MessageHeader),
+                ("Id",     ctypes.c_longlong),
+                ("Price",  ctypes.c_longlong),
+                ("Volume", ctypes.c_longlong),
+                ("Type",   ctypes.c_byte)]
 
-
-# =============================================================================
-# 2. NATIVE LIBRARY WRAPPER CLASS
-# =============================================================================
-
+# ─────────────────── 2. Native reader wrapper  ─────────────────────────
 class FastReader:
     def __init__(self, file_path: str):
         self.lib = None
@@ -150,93 +113,83 @@ class FastReader:
         self.close()
 
 
-# =============================================================================
-# 3. DOMAIN LOGIC
-# =============================================================================
-
-class DepthSnapshot:
+# ─────────────────── 3. Depth & trade handlers  ────────────────────────
+class DepthBook:
     def __init__(self):
-        self.bids = {}
+        self.bids = {}  # price → volume
         self.asks = {}
 
-    def update(self, msg: DepthItem):
+    def apply(self, msg: DepthItem):
         if msg.Flags & MarketFlag.Clear:
             self.bids.clear()
             self.asks.clear()
-        items = self.bids if msg.Flags & MarketFlag.Buy else self.asks
-        price = msg.Price / 10 ** 8
-        volume = msg.Volume / 10 ** 8
+        side = self.bids if msg.Flags & MarketFlag.Buy else self.asks
+        price  = msg.Price  / 1e8
+        volume = msg.Volume / 1e8
         if msg.Volume > 0:
-            items[price] = volume
+            side[price] = volume
         else:
-            items.pop(price, None)
+            side.pop(price, None)
 
-    def printstate(self):
-        best_ask = min(self.asks) if self.asks else None
-        best_bid = max(self.bids) if self.bids else None
-        bid_str = f"{best_bid:.2f}" if best_bid is not None else "N/A"
-        ask_str = f"{best_ask:.2f}" if best_ask is not None else "N/A"
-        # MODIFICATION: Changed to print on a new line for final summary
-        print(f"Bids: {len(self.bids):<6} Asks: {len(self.asks):<6} "
-              f"Best Bid: {bid_str:<10} Best Ask: {ask_str:<10}")
+    # helpers for final report
+    def best_bid(self):
+        return max(self.bids) if self.bids else None
+    def best_ask(self):
+        return min(self.asks) if self.asks else None
 
+class TradeLog(list):
+    def push(self, msg: TickItem):
+        self.append((msg.Header.Time, msg.Price / 1e8, msg.Volume / 1e8))
 
-class TradeProcessor:
-    def __init__(self):
-        self.trades = []
+# ─────────────────── 4. Benchmark loop  ────────────────────────────────
+def run_benchmark(path: str):
+    print(f"Benchmarking {os.path.basename(path)}")
+    start = time.perf_counter()
 
-    def update(self, msg: TickItem):
-        price = msg.Price / 10 ** 8
-        volume = msg.Volume / 10 ** 8
-        self.trades.append((msg.Header.Time, price, volume))
+    depth  = DepthBook()
+    trades = TradeLog()
+    msgs   = 0
+    building_snapshot      = True
+    first_snapshot_reported = False
 
-    def printstate(self):
-        print(f"Trades count: {len(self.trades)}")
-        if self.trades:
-            print(f"Last trade: {self.trades[-1]}")
+    with FastReader(path) as rdr:
+        for raw in rdr:
+            if raw is None:
+                continue
 
+            if isinstance(raw, DepthItem):
+                depth.apply(raw)
 
-def process_messages(file_path):
-    print(f"Starting benchmark for: {file_path}")
-    start_time = time.perf_counter()
-    count = 0
+            elif isinstance(raw, TickItem):
+                trades.push(raw)
+                if building_snapshot:
+                    building_snapshot = False
+                    bb, ba = depth.best_bid(), depth.best_ask()
+                    print("\nFirst complete book:")
+                    print(f"  best bid {bb:.2f}" if bb else "  best bid N/A")
+                    print(f"  best ask {ba:.2f}" if ba else "  best ask N/A")
+                    first_snapshot_reported = True
 
-    depth = DepthSnapshot()
-    trades = TradeProcessor()
+            msgs += 1
 
-    try:
-        with FastReader(file_path) as reader:
-            for msg in reader:
-                if msg is None: continue
+    elapsed = time.perf_counter() - start
+    print(f"\nProcessed {msgs:,} messages in {elapsed:.3f}s  "
+          f"({msgs/elapsed:,.0f} msg/s)")
 
-                if isinstance(msg, DepthItem):
-                    depth.update(msg)
-                elif isinstance(msg, TickItem):
-                    trades.update(msg)
-
-                count += 1
-    except (IOError, FileNotFoundError) as e:
-        print(f"\nError: {e}")
-        return
-
-    end_time = time.perf_counter()
-    duration = end_time - start_time
-
-    print("\n" + "=" * 50)
-    print("BENCHMARK COMPLETE")
-    print(f"Processed {count:,} messages in {duration:.4f} seconds.")
-    if duration > 0:
-        print(f"Messages per second: {count / duration:,.0f}")
-    print("-" * 50)
-    print("Final State:")
-    depth.printstate()
-    trades.printstate()
-    print("=" * 50)
-
-
-if __name__ == "__main__":
-    file_path = '/depths/20250618/ETHUSDT@BINANCEFUT_20250618.bin.lz4'
-    if not os.path.exists(file_path):
-        print(f"Data file not found: {file_path}")
+    if building_snapshot:
+        print("⚠  No trade message encountered – snapshot may be incomplete.")
     else:
-        process_messages(file_path)
+        bb, ba = depth.best_bid(), depth.best_ask()
+        print(f"Book levels → bids {len(depth.bids):,}, asks {len(depth.asks):,}")
+        print(f"Best bid  : {bb:.2f}" if bb else "Best bid  : N/A")
+        print(f"Best ask  : {ba:.2f}" if ba else "Best ask  : N/A")
+    print(f"Trades captured: {len(trades):,}")
+    if trades:
+        print(f"Last trade     : {trades[-1]}")
+
+# ─────────────────── 5. entry point  ───────────────────────────────────
+if __name__ == "__main__":
+    FILE = "/depths/20250618/ETHUSDT@BINANCEFUT_20250618.bin.lz4"
+    if not os.path.exists(FILE):
+        raise SystemExit(f"file not found: {FILE}")
+    run_benchmark(FILE)
